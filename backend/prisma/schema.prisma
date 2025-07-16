@@ -1,0 +1,77 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-py"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+
+enum Role {
+  admin
+  customer
+}
+
+enum Status {
+  waiting
+  served
+  skipped
+}
+
+
+
+model User {
+  id       Int     @id @default(autoincrement())
+  name     String
+  email    String  @unique
+  password String
+  role     Role
+
+  queueEntries QueueEntry[]
+  businesses   Business[] @relation("BusinessOwner")
+}
+
+model Queue {
+  id          Int         @id @default(autoincrement())
+  title       String
+  businessId  Int
+  createdAt   DateTime    @default(now())
+
+  business     Business   @relation(fields: [businessId], references: [id])
+  queueEntries QueueEntry[]
+}
+
+model QueueEntry {
+  id       Int     @id @default(autoincrement())
+  userId   Int
+  queueId  Int
+  position Int
+  status   Status
+
+  user  User  @relation(fields: [userId], references: [id])
+  queue Queue @relation(fields: [queueId], references: [id])
+}
+
+model Business {
+  id        Int     @id @default(autoincrement())
+  name      String
+  ownerId   Int
+
+  owner User   @relation("BusinessOwner", fields: [ownerId], references: [id])
+  queues Queue[]
+}
+
+model Notification {
+  id       Int      @id @default(autoincrement())
+  type     String
+  time     DateTime @default(now())
+  sentTo   Int
+}
