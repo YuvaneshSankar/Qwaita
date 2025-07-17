@@ -30,9 +30,9 @@ model User {
 }
 
 model Queue {
-  id           Int          @id @default(autoincrement())
+  id           String          @id @default(uuid())
   title        String
-  businessId   Int
+  businessId   String
   createdAt    DateTime     @default(now())
 
   business     Business     @relation(fields: [businessId], references: [id])
@@ -42,7 +42,7 @@ model Queue {
 model QueueEntry {
   id       Int     @id @default(autoincrement())
   userId   Int
-  queueId  Int
+  queueId  String
   position Int
   status   Status
 
@@ -51,7 +51,7 @@ model QueueEntry {
 }
 
 model Business {
-  id        Int     @id @default(autoincrement())
+  id        String @id @default(uuid())
   name      String
   ownerId   Int
 
