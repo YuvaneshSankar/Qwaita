@@ -1,8 +1,55 @@
-from fastapi import FastAPI, Path
+from fastapi import FastAPI, Depends, HTTPException, Path, Request, status
 from prisma import Prisma
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+import os
+from jose import jwt, JWTError
+import httpx
+
+
+
+load_dotenv()
 
 app = FastAPI()
 db = Prisma()
+
+origins=["http://localhost:3000"]
+CLERK_JWT_PUBLIC_KEY = os.getenv("CLERK_JWT_PUBLIC_KEY")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+#auth middleware
+
+async def verify_clerk_user(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid or missing Authorization header")
+
+    session_token = auth_header.split("Bearer ")[1]
+    headers = {"Authorization": f"Bearer {CLERK_SECRET_KEY}"}
+
+    async with httpx.AsyncClient() as client:
+        # Validate session
+        session_resp = await client.get(f"https://api.clerk.dev/v1/sessions/{session_token}", headers=headers)
+        if session_resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid session token")
+
+        session_data = session_resp.json()
+        user_id = session_data["user_id"]
+
+        # Get full user info
+        user_resp = await client.get(f"https://api.clerk.dev/v1/users/{user_id}", headers=headers)
+        if user_resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="Failed to fetch user info")
+
+        return user_resp.json()
+    
 
 
 @app.on_event("startup")
@@ -13,14 +60,73 @@ async def connect_db():
 async def disconnect_db():
     await db.disconnect()
 
-@app.get("/")
-def header():
-    return {"message": "Hi there"}
 
 
-@app.post("/users")
-def create_user():
-    return {"message": "Created user"}
+#Auth routes
+@app.post("/user/signup")
+async def create_user(user_data: dict = Depends(verify_clerk_user)):
+    user_id = user_data["id"]
+    email = user_data["email_addresses"][0]["email_address"]
+    name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
+
+    existing = await db.user.find_unique(where={"clerk_id": user_id})
+    if existing:
+        raise HTTPException(status_code=400, detail="User already exists. Please login.")
+
+    await db.user.create(
+        data={
+            "clerk_id": user_id,
+            "name": name,
+            "email": email,
+            "role": "customer"
+        }
+    )
+    return {"message": "User signed up successfully."}
+
+
+@app.post("/admin/signup")
+async def create_admin(admin_data: dict = Depends(verify_clerk_user)):
+    admin_id = admin_data["id"]
+    email = admin_data["email_addresses"][0]["email_address"]
+    name = f"{admin_data.get('first_name', '')} {admin_data.get('last_name', '')}".strip()
+
+    existing = await db.user.find_unique(where={"clerk_id": admin_id})
+    if existing:
+        raise HTTPException(status_code=400, detail="Admin already exists. Please login.")
+
+    await db.user.create(
+        data={
+            "clerk_id": admin_id,
+            "name": name,
+            "email": email,
+            "role": "admin"
+        }
+    )
+    return {"message": "Admin signed up successfully."}
+
+
+@app.post("/user/login")
+async def user_login(user_data: dict = Depends(verify_clerk_user)):
+    user_id = user_data["id"]
+    user = await db.user.find_unique(where={"clerk_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found. Please sign up.")
+    return {"message": "User logged in successfully."}
+
+
+@app.post("/admin/login")
+async def admin_login(admin_data: dict = Depends(verify_clerk_user)):
+    admin_id = admin_data["id"]
+    admin = await db.user.find_unique(where={"clerk_id": admin_id})
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin not found. Please sign up.")
+    return {"message": "Admin logged in successfully."}
+
+
+
+
+
+
 
 @app.get("/admin/users/{user_id}")
 def get_user(user_id: int = Path(...)):
