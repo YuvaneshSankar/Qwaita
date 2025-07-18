@@ -33,7 +33,7 @@ async def verify_clerk_user(request: Request):
         raise HTTPException(status_code=401, detail="Invalid or missing Authorization header")
 
     session_token = auth_header.split("Bearer ")[1]
-    headers = {"Authorization": f"Bearer {CLERK_SECRET_KEY}"}
+    headers = {"Authorization": f"Bearer {CLERK_JWT_PUBLIC_KEY}"}
 
     async with httpx.AsyncClient() as client:
         # Validate session
@@ -135,19 +135,20 @@ async def get_user(user_id: int = Path(...)):
 
 
 @app.post("/admin/{user_id}/businesses")
-async def create_business(request :Request,user_id:int =Path(...)):
-    business_name=request.get("name")
-    owner_id=user_id
-    created_id=str(uuid4())
+async def create_business(request: Request, user_id: int = Path(...)):
+    data = await request.json()
+    business_name = data.get("name")
+    owner_id = user_id
+    created_id = str(uuid4())
+
     await db.business.create(
         data={
-            "id"=created_id,
-            "name"=business_name;
-            "ownerId"=owner_id,
-
+            "id": created_id,
+            "name": business_name,
+            "ownerId": owner_id,
         }
     )
-    return {"message": "Created business sucessfully"}
+    return {"message": "Created business successfully"}
 
 
 @app.get("/admin/business/{business_id}")
@@ -160,10 +161,10 @@ async def get_business(business_id: str = Path(...)):
 
 
 @app.post("/admin/{business_id}/queues")
-def create_queues(request : Request , business_id: str=Path(...)):
+async def create_queues(request : Request , business_id: str=Path(...)):
     queue_id=str(uuid4())
     title=request.get("Title")
-    now=datatime.utcnow()
+    now = datetime.now(datetime.timezone.utc)
     await db.queue.create(
         data={
             "id":queue_id,
@@ -176,26 +177,53 @@ def create_queues(request : Request , business_id: str=Path(...)):
 
 
 
+@app.post("/user/queues/{queue_id}/join/{user_id}")
+async def join_queue(queue_id: str = Path(...), user_id: int = Path(...)):
+    existing=await db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    if existing:
+        raise HTTPException(status_code=404,detail="User already joined this queue.")
+    count=db.queueentry.count(where={"queueId":queue_id})
+    position=count+1
+    await db.queueentry.create(
+        data={
+            "queueId":queue_id,
+            "userId":user_id,
+            "position":position,
+            "status":"waiting",
+        }
+    )
+    return {"message": f"User {user_id} joined queue {queue_id}"}
+
+
+
+
+
+
+@app.get("/user/queues/{queue_id}/position/{user_id}")
+async def get_position(queue_id: str = Path(...), user_id: int = Path(...)):
+    existing = await db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    if not existing:
+        raise HTTPException(status_code=404,detail="User has not joined this queue. Please join .")
+    return {"message": f"User {user_id}'s position in queue {queue_id} is {existing.position}"}
+
+
+
+
 @app.get("/admin/business/{business_id}/queues")
 def get_all_business_queues(business_id: int = Path(...)):
-    return {"message": f"The business {business_id} has created these queues"}
-
-
-
-@app.get("/admin/analytics/{business_id}")
-def get_all_queues_analytics_under_a_business(business_id: int = Path(...)):
-    return {"message": f"These are the analytics of all queues created by business {business_id}"}
-
+    queues=db.queue.find_many(where={"businessId":business_id },order={ "createdAt":"asc"})
+    return {"message": f"The business {business_id} has created {queues} queues"}
 
 
 
 @app.get("/admin/users/{user_id}/queues")
 def get_all_users_queues(user_id: int = Path(...)):
-    return {"message": f"The user {user_id} has joined these many queues"}
+    queues=db.queue.find_many(where={"userId":user_id},order={"createdAt":"asc"})
+    return {"message": f"The user {user_id} has joined {queues} queues"}
 
-@app.get("/admin/queues/{queue_id}")
-def get_queue(queue_id: int = Path(...)):
-    return {"message": f"Queue details of {queue_id}"}
+
+
+
 
 @app.patch("/admin/queues/{queue_id}/status/{user_id}")
 def change_status_user(queue_id: int = Path(...), user_id: int = Path(...)):
@@ -206,14 +234,29 @@ def check_status_user(queue_id: int = Path(...), user_id: int = Path(...)):
     return {"message": f"Status of user {user_id} in queue {queue_id}"}
 
 
-@app.post("/user/queues/{queue_id}/join/{user_id}")
-def join_queue(queue_id: int = Path(...), user_id: int = Path(...)):
-    return {"message": f"User {user_id} joined queue {queue_id}"}
+
+
+
+@app.get("/admin/analytics/{business_id}")
+def get_all_queues_analytics_under_a_business(business_id: int = Path(...)):
+    return {"message": f"These are the analytics of all queues created by business {business_id}"}
+
+
+
+
+
+
+@app.get("/admin/queues/{queue_id}")
+def get_queue(queue_id: int = Path(...)):
+    return {"message": f"Queue details of {queue_id}"}
+
+
+
+
+
 
 @app.post("/user/queues/{queue_id}/notify/{user_id}")
 def notify_user(queue_id: int = Path(...), user_id: int = Path(...)):
     return {"message": f"Notified user {user_id} in queue {queue_id}"}
 
-@app.get("/user/queues/{queue_id}/position/{user_id}")
-def get_position(queue_id: int = Path(...), user_id: int = Path(...)):
-    return {"message": f"User {user_id}'s position in queue {queue_id}"}
+
