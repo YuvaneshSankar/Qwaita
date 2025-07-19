@@ -27,6 +27,8 @@ model User {
 
   queueEntries QueueEntry[]
   businesses   Business[] @relation("BusinessOwner")
+  notifications Notification[]
+
 }
 
 model Queue {
@@ -64,4 +66,7 @@ model Notification {
   type    String
   time    DateTime @default(now())
   sentTo  Int
+
+  user    User     @relation(fields: [sentTo], references: [id])
 }
+

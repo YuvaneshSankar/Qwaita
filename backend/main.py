@@ -6,18 +6,18 @@ import os
 from jose import jwt, JWTError
 import httpx
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 import smtplib
 from email.mime.text import MIMEText
-
 
 load_dotenv()
 
 app = FastAPI()
 db = Prisma()
 
-origins=["http://localhost:3000"]
+origins = ["http://localhost:3000"]
 CLERK_JWT_PUBLIC_KEY = os.getenv("CLERK_JWT_PUBLIC_KEY")
+CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")  # IMPORTANT: Added missing env var
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,46 +27,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-#auth middleware
+#--------------- AUTH MIDDLEWARE ---------------#
 
 async def verify_clerk_user(request: Request):
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid or missing Authorization header")
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
 
     session_token = auth_header.split("Bearer ")[1]
-    headers = {"Authorization": f"Bearer {CLERK_JWT_PUBLIC_KEY}"}
+    headers = {"Authorization": f"Bearer {CLERK_SECRET_KEY}"}
 
-    async with httpx.AsyncClient() as client:
-        # Validate session
-        session_resp = await client.get(f"https://api.clerk.dev/v1/sessions/{session_token}", headers=headers)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        session_resp = await client.get(
+            f"https://api.clerk.dev/v1/sessions/{session_token}",
+            headers=headers
+        )
         if session_resp.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid session token")
+            raise HTTPException(status_code=401, detail="Invalid session")
 
         session_data = session_resp.json()
-        user_id = session_data["user_id"]
+        user_id = session_data.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="No user_id found")
 
-        # Get full user info
-        user_resp = await client.get(f"https://api.clerk.dev/v1/users/{user_id}", headers=headers)
+        user_resp = await client.get(
+            f"https://api.clerk.dev/v1/users/{user_id}",
+            headers=headers
+        )
         if user_resp.status_code != 200:
-            raise HTTPException(status_code=401, detail="Failed to fetch user info")
-
+            raise HTTPException(status_code=401, detail="User fetch failed")
         return user_resp.json()
-    
 
-
+#--------------- EMAIL UTILS ---------------#
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 EMAIL_ADDRESS = "yuvanesh.ykv@gmail.com"
-EMAIL_PASSWORD = "pdbsjwksqyfeztlr"  # Use App Password if using Gmail 2FA
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 async def send_email(to_email: str, subject: str, body: str):
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = EMAIL_ADDRESS
     msg["To"] = to_email
-
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
@@ -75,21 +78,18 @@ async def send_email(to_email: str, subject: str, body: str):
     except Exception as e:
         print("Email failed:", e)
 
-
-
-
+#--------------- DATABASE LIFESPAN ---------------#
 
 @app.on_event("startup")
-async def connect_db():
+async def startup():
     await db.connect()
 
 @app.on_event("shutdown")
-async def disconnect_db():
+async def shutdown():
     await db.disconnect()
 
+#--------------- AUTH ROUTES ---------------#
 
-
-#Auth routes
 @app.post("/user/signup")
 async def create_user(user_data: dict = Depends(verify_clerk_user)):
     user_id = user_data["id"]
@@ -109,7 +109,6 @@ async def create_user(user_data: dict = Depends(verify_clerk_user)):
         }
     )
     return {"message": "User signed up successfully."}
-
 
 @app.post("/admin/signup")
 async def create_admin(admin_data: dict = Depends(verify_clerk_user)):
@@ -131,7 +130,6 @@ async def create_admin(admin_data: dict = Depends(verify_clerk_user)):
     )
     return {"message": "Admin signed up successfully."}
 
-
 @app.post("/user/login")
 async def user_login(user_data: dict = Depends(verify_clerk_user)):
     user_id = user_data["id"]
@@ -140,25 +138,22 @@ async def user_login(user_data: dict = Depends(verify_clerk_user)):
         raise HTTPException(status_code=404, detail="User not found. Please sign up.")
     return {"message": "User logged in successfully."}
 
-
 @app.post("/admin/login")
 async def admin_login(admin_data: dict = Depends(verify_clerk_user)):
     admin_id = admin_data["id"]
     admin = await db.user.find_unique(where={"clerkUserId": admin_id})
     if not admin:
-        raise HTTPException(status_code=404, detail="Admin not found. Please sign in.")
+        raise HTTPException(status_code=404, detail="Admin not found. Please sign up.")
     return {"message": "Admin logged in successfully."}
 
-
+#--------------- USER AND BUSINESS ROUTES ---------------#
 
 @app.get("/admin/users/{user_id}")
 async def get_user(user_id: int = Path(...)):
-    user=await db.user.find_unique(where={"id":user_id})
-    if not user :
-        raise HTTPException(status_code=404,detail="User not found . Please sing in.")
-    return {"User":user}
-
-
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found. Please sign in.")
+    return {"User": user}
 
 @app.post("/admin/{user_id}/businesses")
 async def create_business(request: Request, user_id: int = Path(...)):
@@ -176,119 +171,111 @@ async def create_business(request: Request, user_id: int = Path(...)):
     )
     return {"message": "Created business successfully"}
 
-
 @app.get("/admin/business/{business_id}")
 async def get_business(business_id: str = Path(...)):
-    business=await db.business.find_unique(where={"id":business_id})
+    business = await db.business.find_unique(where={"id": business_id})
     if not business:
-        raise HTTPException(status_code=404,detail="Business not found . Go to create Business")
-    return {"business":business}
-
-
+        raise HTTPException(status_code=404, detail="Business not found. Go to create Business")
+    return {"business": business}
 
 @app.post("/admin/{business_id}/queues")
-async def create_queues(request : Request , business_id: str=Path(...)):
-    queue_id=str(uuid4())
-    title=request.get("Title")
-    now = datetime.now(datetime.timezone.utc)
+async def create_queues(request: Request, business_id: str = Path(...)):
+    data = await request.json()
+    queue_id = str(uuid4())
+    title = data.get("title") or data.get("Title")
+    now = datetime.now(timezone.utc)
     await db.queue.create(
         data={
-            "id":queue_id,
-            "title":title,
-            "businessId":business_id,
-            "createdAt":now,
+            "id": queue_id,
+            "title": title,
+            "businessId": business_id,
+            "createdAt": now,
         }
     )
-    return {"message":"Created queue succesfully for the business {business_id}"}
-
-
+    return {"message": f"Created queue successfully for the business {business_id}"}
 
 @app.post("/user/queues/{queue_id}/join/{user_id}")
 async def join_queue(queue_id: str = Path(...), user_id: int = Path(...)):
-    existing=await db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    existing = await db.queueentry.find_first(where={"queueId": queue_id, "userId": user_id})
     if existing:
-        raise HTTPException(status_code=404,detail="User already joined this queue.")
-    count=db.queueentry.count(where={"queueId":queue_id})
-    position=count+1
+        raise HTTPException(status_code=400, detail="User already joined this queue.")
+    count = await db.queueentry.count(where={"queueId": queue_id})
+    position = count + 1
     await db.queueentry.create(
         data={
-            "queueId":queue_id,
-            "userId":user_id,
-            "position":position,
-            "status":"waiting",
+            "queueId": queue_id,
+            "userId": user_id,
+            "position": position,
+            "status": "waiting",
         }
     )
     return {"message": f"User {user_id} joined queue {queue_id}"}
 
-
-
-
-
-
 @app.get("/user/queues/{queue_id}/position/{user_id}")
 async def get_position(queue_id: str = Path(...), user_id: int = Path(...)):
-    existing = await db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    existing = await db.queueentry.find_first(where={"queueId": queue_id, "userId": user_id})
     if not existing:
-        raise HTTPException(status_code=404,detail="User has not joined this queue. Please join .")
+        raise HTTPException(status_code=404, detail="User has not joined this queue. Please join.")
     return {"message": f"User {user_id}'s position in queue {queue_id} is {existing.position}"}
 
-
-
-
 @app.get("/admin/business/{business_id}/queues")
-def get_all_business_queues(business_id: int = Path(...)):
-    queues=db.queue.find_many(where={"businessId":business_id },order={ "createdAt":"asc"})
-    return {"message": f"The business {business_id} has created {queues} queues"}
-
-
+async def get_all_business_queues(business_id: str = Path(...)):
+    queues = await db.queue.find_many(where={"businessId": business_id}, order={"createdAt": "asc"})
+    return {"message": f"The business {business_id} has created {len(queues)} queues", "queues": queues}
 
 @app.get("/admin/users/{user_id}/queues")
-def get_all_users_queues(user_id: int = Path(...)):
-    queues=db.queue.find_many(where={"userId":user_id},order={"createdAt":"asc"})
-    return {"message": f"The user {user_id} has joined {queues} queues"}
-
-
+async def get_all_users_queues(user_id: int = Path(...)):
+    # Should get all QueueEntry for user_id, then join with Queue to get queue info
+    queue_entries = await db.queueentry.find_many(where={"userId": user_id})
+    queue_ids = [qe.queueId for qe in queue_entries]
+    queues = await db.queue.find_many(where={"id": {"in": queue_ids}}, order={"createdAt": "asc"}) if queue_ids else []
+    return {"message": f"The user {user_id} has joined {len(queues)} queues", "queues": queues}
 
 @app.patch("/admin/queues/{queue_id}/status/{user_id}")
-async def change_status_user(queue_id: str = Path(...), user_id: int = Path(...),request =Request):
-    status=request.get("status")
+async def change_status_user(queue_id: str = Path(...), user_id: int = Path(...), request: Request = None):
+    data = await request.json()
+    status_val = data.get("status")
     valid_status = ["waiting", "served", "skipped"]
-    if status not in valid_status:
+    if status_val not in valid_status:
         raise HTTPException(status_code=400, detail="Invalid status")
-    await db.queueentry.update(where={"queueId":queue_id,"userId":user_id},data={"status":status})
-    return {"message": f"Changed status of user {user_id} in queue {queue_id} to {status}"}
+    entry = await db.queueentry.find_first(where={"queueId": queue_id, "userId": user_id})
+    if not entry:
+        raise HTTPException(status_code=404, detail="User not in the queue")
+    await db.queueentry.update(
+        where={"id": entry.id},
+        data={"status": status_val}
+    )
+    return {"message": f"Changed status of user {user_id} in queue {queue_id} to {status_val}"}
 
 @app.get("/admin/queues/{queue_id}/status/{user_id}")
 async def check_status_user(queue_id: str = Path(...), user_id: int = Path(...)):
-    user_status=db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    user_status = await db.queueentry.find_first(where={"queueId": queue_id, "userId": user_id})
     if not user_status:
         raise HTTPException(status_code=404, detail="User not in the queue")
     return {"message": f"Status of user {user_id} in queue {queue_id} is {user_status.status}"}
 
-
 @app.post("/admin/queues/{queue_id}/leave/{user_id}")
 async def leave_queue(queue_id: str = Path(...), user_id: int = Path(...)):
-    user=await db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    user = await db.queueentry.find_first(where={"queueId": queue_id, "userId": user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not in the queue")
-    position_left=user.position
-    await db.queueentry.update_many(where={"queueId":queue_id,"userId":user_id},data={"status":"skipped"})
-    await db.queueentry.update_many(where={"queueId":queue_id,"position":{"gt":position_left}},data={"position":{"decrement":1}})
-    return {"message": f"User {user_id}left the queue{queue_id}. Positions updated."}
-
-
-
+    position_left = user.position
+    # Mark this entry skipped
+    await db.queueentry.update(
+        where={"id": user.id},
+        data={"status": "skipped"}
+    )
+    # Decrement positions of those after
+    await db.queueentry.update_many(
+        where={"queueId": queue_id, "position": {"gt": position_left}},
+        data={"position": {"decrement": 1}}
+    )
+    return {"message": f"User {user_id} left the queue {queue_id}. Positions updated."}
 
 @app.get("/admin/queues/{queue_id}")
 async def get_queue(queue_id: str = Path(...)):
-    queue=await db.queue.find_first(where={"queueId":queue_id})
+    queue = await db.queue.find_unique(where={"id": queue_id})
     return {"message": f"Queue details of {queue_id} is {queue}"}
-
-
-
-
-
-
 
 @app.get("/admin/analytics/{business_id}")
 async def get_all_queues_analytics_under_a_business(business_id: str = Path(...)):
@@ -305,9 +292,10 @@ async def get_all_queues_analytics_under_a_business(business_id: str = Path(...)
     all_queue_data = []
 
     for queue in queues:
-        total_users = len(queue.queueEntries)
-        served = sum(1 for e in queue.queueEntries if e.status == "served")
-        skipped = sum(1 for e in queue.queueEntries if e.status == "skipped")
+        entries = queue.queueEntries
+        total_users = len(entries)
+        served = sum(1 for e in entries if e.status == "served")
+        skipped = sum(1 for e in entries if e.status == "skipped")
         waiting = total_users - served - skipped
 
         business_total_users += total_users
@@ -338,28 +326,20 @@ async def get_all_queues_analytics_under_a_business(business_id: str = Path(...)
         "queues": all_queue_data
     }
 
-
-
 @app.post("/user/queues/{queue_id}/notify/{user_id}")
 async def notify_user(queue_id: str = Path(...), user_id: int = Path(...)):
     queue_entry = await db.queueentry.find_first(
         where={"queueId": queue_id, "userId": user_id}
     )
-
     if not queue_entry:
         raise HTTPException(status_code=404, detail="User not found in the queue")
-
     if queue_entry.position == 5:
         user = await db.user.find_unique(where={"id": user_id})
         if not user or not user.email:
             raise HTTPException(status_code=404, detail="User email not found")
-
         subject = "Your Turn is Coming Soon!"
         body = f"Hi {user.name},\n\nYou are now position 5 in queue {queue_id}. Please be ready."
-
         await send_email(to_email=user.email, subject=subject, body=body)
-
-
         return {"message": f"Email notification sent to user {user_id}"}
     else:
         return {"message": f"User {user_id} is at position {queue_entry.position}, no notification sent."}
