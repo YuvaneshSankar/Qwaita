@@ -230,9 +230,12 @@ async def get_all_users_queues(user_id: int = Path(...)):
     queue_ids = [qe.queueId for qe in queue_entries]
     queues = await db.queue.find_many(where={"id": {"in": queue_ids}}, order={"createdAt": "asc"}) if queue_ids else []
     return {"message": f"The user {user_id} has joined {len(queues)} queues", "queues": queues}
-
 @app.patch("/admin/queues/{queue_id}/status/{user_id}")
-async def change_status_user(queue_id: str = Path(...), user_id: int = Path(...), request: Request = None):
+async def change_status_user(
+    queue_id: str = Path(...), 
+    user_id: int = Path(...), 
+    request: Request = None
+):
     data = await request.json()
     status_val = data.get("status")
     valid_status = ["waiting", "served", "skipped"]
@@ -241,11 +244,26 @@ async def change_status_user(queue_id: str = Path(...), user_id: int = Path(...)
     entry = await db.queueentry.find_first(where={"queueId": queue_id, "userId": user_id})
     if not entry:
         raise HTTPException(status_code=404, detail="User not in the queue")
+
+    # Perform status update
     await db.queueentry.update(
         where={"id": entry.id},
         data={"status": status_val}
     )
+
+    if status_val in ["skipped", "served"]:
+        await db.queueentry.update_many(
+            where={
+                "queueId": queue_id,
+                "position": {"gt": entry.position},
+            },
+            data={
+                "position": {"decrement": 1}
+            }
+        )
+
     return {"message": f"Changed status of user {user_id} in queue {queue_id} to {status_val}"}
+
 
 @app.get("/admin/queues/{queue_id}/status/{user_id}")
 async def check_status_user(queue_id: str = Path(...), user_id: int = Path(...)):
