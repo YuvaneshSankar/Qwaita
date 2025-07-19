@@ -7,6 +7,8 @@ from jose import jwt, JWTError
 import httpx
 from uuid import uuid4
 from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
 
 
 load_dotenv()
@@ -51,6 +53,30 @@ async def verify_clerk_user(request: Request):
 
         return user_resp.json()
     
+
+
+
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+EMAIL_ADDRESS = "yuvanesh.ykv@gmail.com"
+EMAIL_PASSWORD = "pdbsjwksqyfeztlr"  # Use App Password if using Gmail 2FA
+
+async def send_email(to_email: str, subject: str, body: str):
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_ADDRESS
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+    except Exception as e:
+        print("Email failed:", e)
+
+
+
 
 
 @app.on_event("startup")
@@ -223,40 +249,117 @@ def get_all_users_queues(user_id: int = Path(...)):
 
 
 
-
-
 @app.patch("/admin/queues/{queue_id}/status/{user_id}")
-def change_status_user(queue_id: int = Path(...), user_id: int = Path(...)):
-    return {"message": f"Changed status of user {user_id} in queue {queue_id}"}
+async def change_status_user(queue_id: str = Path(...), user_id: int = Path(...),request =Request):
+    status=request.get("status")
+    valid_status = ["waiting", "served", "skipped"]
+    if status not in valid_status:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    await db.queueentry.update(where={"queueId":queue_id,"userId":user_id},data={"status":status})
+    return {"message": f"Changed status of user {user_id} in queue {queue_id} to {status}"}
 
 @app.get("/admin/queues/{queue_id}/status/{user_id}")
-def check_status_user(queue_id: int = Path(...), user_id: int = Path(...)):
-    return {"message": f"Status of user {user_id} in queue {queue_id}"}
+async def check_status_user(queue_id: str = Path(...), user_id: int = Path(...)):
+    user_status=db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    if not user_status:
+        raise HTTPException(status_code=404, detail="User not in the queue")
+    return {"message": f"Status of user {user_id} in queue {queue_id} is {user_status.status}"}
+
+
+@app.post("/admin/queues/{queue_id}/leave/{user_id}")
+async def leave_queue(queue_id: str = Path(...), user_id: int = Path(...)):
+    user=await db.queueentry.find_first(where={"queueId":queue_id,"userId":user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not in the queue")
+    position_left=user.position
+    await db.queueentry.update_many(where={"queueId":queue_id,"userId":user_id},data={"status":"skipped"})
+    await db.queueentry.update_many(where={"queueId":queue_id,"position":{"gt":position_left}},data={"position":{"decrement":1}})
+    return {"message": f"User {user_id}left the queue{queue_id}. Positions updated."}
+
+
+
+
+@app.get("/admin/queues/{queue_id}")
+async def get_queue(queue_id: str = Path(...)):
+    queue=await db.queue.find_first(where={"queueId":queue_id})
+    return {"message": f"Queue details of {queue_id} is {queue}"}
+
+
 
 
 
 
 
 @app.get("/admin/analytics/{business_id}")
-def get_all_queues_analytics_under_a_business(business_id: int = Path(...)):
-    return {"message": f"These are the analytics of all queues created by business {business_id}"}
+async def get_all_queues_analytics_under_a_business(business_id: str = Path(...)):
+    queues = await db.queue.find_many(
+        where={"businessId": business_id},
+        include={"queueEntries": True},
+        order={"createdAt": "asc"}
+    )
 
+    business_total_users = 0
+    total_served = 0
+    total_skipped = 0
+    total_waiting = 0
+    all_queue_data = []
 
+    for queue in queues:
+        total_users = len(queue.queueEntries)
+        served = sum(1 for e in queue.queueEntries if e.status == "served")
+        skipped = sum(1 for e in queue.queueEntries if e.status == "skipped")
+        waiting = total_users - served - skipped
 
+        business_total_users += total_users
+        total_served += served
+        total_skipped += skipped
+        total_waiting += waiting
 
+        all_queue_data.append({
+            "queueId": queue.id,
+            "title": queue.title,
+            "createdAt": queue.createdAt,
+            "totalUsers": total_users,
+            "servedUsers": served,
+            "skippedUsers": skipped,
+            "waitingUsers": waiting,
+        })
 
+    average_users_per_queue = business_total_users / len(queues) if queues else 0
 
-@app.get("/admin/queues/{queue_id}")
-def get_queue(queue_id: int = Path(...)):
-    return {"message": f"Queue details of {queue_id}"}
-
-
-
+    return {
+        "businessId": business_id,
+        "totalQueues": len(queues),
+        "totalUsersAcrossQueues": business_total_users,
+        "averageUsersPerQueue": average_users_per_queue,
+        "totalServedUsers": total_served,
+        "totalSkippedUsers": total_skipped,
+        "totalWaitingUsers": total_waiting,
+        "queues": all_queue_data
+    }
 
 
 
 @app.post("/user/queues/{queue_id}/notify/{user_id}")
-def notify_user(queue_id: int = Path(...), user_id: int = Path(...)):
-    return {"message": f"Notified user {user_id} in queue {queue_id}"}
+async def notify_user(queue_id: str = Path(...), user_id: int = Path(...)):
+    queue_entry = await db.queueentry.find_first(
+        where={"queueId": queue_id, "userId": user_id}
+    )
+
+    if not queue_entry:
+        raise HTTPException(status_code=404, detail="User not found in the queue")
+
+    if queue_entry.position == 5:
+        user = await db.user.find_unique(where={"id": user_id})
+        if not user or not user.email:
+            raise HTTPException(status_code=404, detail="User email not found")
+
+        subject = "Your Turn is Coming Soon!"
+        body = f"Hi {user.name},\n\nYou are now position 5 in queue {queue_id}. Please be ready."
+
+        await send_email(to_email=user.email, subject=subject, body=body)
 
 
+        return {"message": f"Email notification sent to user {user_id}"}
+    else:
+        return {"message": f"User {user_id} is at position {queue_entry.position}, no notification sent."}
