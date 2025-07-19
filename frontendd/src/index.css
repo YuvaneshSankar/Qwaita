@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+
+@font-face {
+  font-family: 'UT Breado';
+  src: url('/fonts/UTBreadoSansDemo.woff2') format('woff2'); 
+}
+
+.glow-text {
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.3),
+               0 0 20px rgba(255, 255, 255, 0.2);
+}
